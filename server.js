@@ -1,3 +1,4 @@
+```javascript
 const WebSocket = require('ws');
 const wss = new WebSocket.Server({ port: process.env.PORT || 8080 });
 
@@ -40,6 +41,7 @@ class Domino {
 }
 
 function initializeGame(numPlayers, names) {
+  console.log('Initializing game with', numPlayers, 'players:', names);
   gameState = {
     dominoes: [],
     board: [],
@@ -49,16 +51,15 @@ function initializeGame(numPlayers, names) {
     selectedDomino: null,
     gameStarted: false,
     playerNames: names,
-    currentRound: 9, // Start with double-9
+    currentRound: 9,
     spinner: null,
     openEnds: [],
     scores: Array(numPlayers).fill(0),
     doubleCounter: 0,
     doubleInPlay: null,
-    roundWinner: null
+    roundWinner: 0
   };
 
-  // Initialize dominoes (double-9 set + 11 spinners)
   for (let i = 0; i <= 9; i++) {
     for (let j = i; j <= 9; j++) {
       gameState.dominoes.push(new Domino(i, j));
@@ -69,7 +70,6 @@ function initializeGame(numPlayers, names) {
     gameState.dominoes.push(new Domino('S', i));
   }
 
-  // Shuffle dominoes
   for (let i = gameState.dominoes.length - 1; i > 0; i--) {
     let j = Math.floor(Math.random() * (i + 1));
     [gameState.dominoes[i], gameState.dominoes[j]] = [gameState.dominoes[j], gameState.dominoes[i]];
@@ -112,7 +112,6 @@ function findStartingPlayer() {
     for (let domino of gameState.players[i]) {
       if ((domino.a === gameState.currentRound && domino.b === gameState.currentRound) || (domino.a === 'S' && domino.b === 'S')) {
         gameState.currentPlayer = i;
-        gameState.roundWinner = i;
         hasSetDomino = true;
         break;
       }
@@ -157,7 +156,6 @@ function initializeRound() {
   gameState.doubleCounter = 0;
   gameState.doubleInPlay = null;
 
-  // Reinitialize dominoes
   for (let i = 0; i <= 9; i++) {
     for (let j = i; j <= 9; j++) {
       gameState.dominoes.push(new Domino(i, j));
@@ -168,7 +166,6 @@ function initializeRound() {
     gameState.dominoes.push(new Domino('S', i));
   }
 
-  // Shuffle
   for (let i = gameState.dominoes.length - 1; i > 0; i--) {
     let j = Math.floor(Math.random() * (i + 1));
     [gameState.dominoes[i], gameState.dominoes[j]] = [gameState.dominoes[j], gameState.dominoes[i]];
@@ -282,8 +279,8 @@ function updateOpenEnds(domino, placement) {
       gameState.openEnds.push({ domino, value: domino.a === 'S' ? matchedEnd.value : domino.a, side: 'top', x: domino.x, y: domino.y - 15 });
       gameState.openEnds.push({ domino, value: domino.a === 'S' ? matchedEnd.value : domino.a, side: 'bottom', x: domino.x, y: domino.y + 15 });
     } else {
-      let matchedValue = (domino.a === matchedEnd.value || domino.a === 'S') ? domino.b : domino.a;
-      let unmatchedValue = (domino.a === matchedEnd.value || domino.a === 'S') ? domino.a : domino.b;
+      let matchedValue = domino.a === matchedEnd.value || domino.a === 'S' ? domino.b : domino.a;
+      let unmatchedValue = domino.a === matchedEnd.value || domino.a === 'S' ? domino.a : domino.b;
       if (placement.rotation === 0 || placement.rotation === 180) {
         gameState.openEnds.push({ domino, value: matchedValue, side: 'left', x: domino.x - 25, y: domino.y });
         gameState.openEnds.push({ domino, value: unmatchedValue, side: 'right', x: domino.x + 25, y: domino.y });
@@ -314,7 +311,7 @@ function checkGameEnd() {
     for (let i = 0; i < gameState.players.length; i++) {
       gameState.scores[i] += gameState.players[i].reduce((sum, domino) => sum + domino.getScore(), 0);
     }
-    gameState.scores[gameState.currentPlayer] += 0; // Round winner scores 0
+    gameState.scores[gameState.currentPlayer] += 0;
     if (gameState.currentRound > 0) {
       gameState.currentRound--;
       initializeRound();
@@ -340,17 +337,21 @@ function endGame() {
 
 function broadcastState() {
   clients.forEach(client => {
-    client.send(JSON.stringify({ type: 'state', state: gameState }));
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(JSON.stringify({ type: 'state', state: gameState }));
+    }
   });
 }
 
 wss.on('connection', (ws) => {
+  console.log('New client connected');
   ws.on('message', (message) => {
     const msg = JSON.parse(message);
     if (msg.type === 'join') {
       clients.push(ws);
       ws.playerId = clients.length - 1;
       playerNames.push(msg.names[ws.playerId]);
+      console.log(`Player ${ws.playerId} joined: ${msg.names[ws.playerId]}`);
       if (clients.length === msg.numPlayers) {
         initializeGame(msg.numPlayers, msg.names);
       }
@@ -363,13 +364,14 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
+    console.log('Client disconnected');
     clients = clients.filter(client => client !== ws);
-    playerNames = playerNames.filter((_, i) => clients.some(client => client.playerId === i));
-    if (clients.length === 0) {
-      gameState = null;
-      playerNames = [];
-    }
+  });
+
+  ws.on('error', (error) => {
+    console.error('WebSocket error:', error);
   });
 });
 
 console.log('WebSocket server running on port', process.env.PORT || 8080);
+```
