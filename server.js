@@ -1,3 +1,4 @@
+
 ```javascript
 const WebSocket = require('ws');
 const wss = new WebSocket.Server({ port: process.env.PORT || 8080 });
@@ -41,7 +42,7 @@ class Domino {
 }
 
 function initializeGame(numPlayers, names) {
-  console.log('Initializing game with', numPlayers, 'players:', names);
+  console.log('Initializing game with ' + numPlayers + ' players: ' + names.join(', '));
   gameState = {
     dominoes: [],
     board: [],
@@ -113,6 +114,7 @@ function findStartingPlayer() {
       if ((domino.a === gameState.currentRound && domino.b === gameState.currentRound) || (domino.a === 'S' && domino.b === 'S')) {
         gameState.currentPlayer = i;
         hasSetDomino = true;
+        console.log('Starting player: ' + gameState.playerNames[i] + ' with [' + domino.a + '|' + domino.b + ']');
         break;
       }
     }
@@ -129,6 +131,7 @@ function findStartingPlayer() {
         if ((domino.a === gameState.currentRound && domino.b === gameState.currentRound) || (domino.a === 'S' && domino.b === 'S')) {
           gameState.currentPlayer = playerIndex;
           hasSetDomino = true;
+          console.log('Starting player after draw: ' + gameState.playerNames[playerIndex] + ' with [' + domino.a + '|' + domino.b + ']');
         }
         drawRound++;
       }
@@ -137,8 +140,10 @@ function findStartingPlayer() {
   if (!hasSetDomino) {
     gameState.currentRound--;
     if (gameState.currentRound >= 0) {
+      console.log('No set domino found, moving to round ' + (10 - gameState.currentRound));
       initializeRound();
     } else {
+      console.log('Game over: no set domino found in final round');
       endGame();
     }
   }
@@ -178,7 +183,10 @@ function initializeRound() {
 }
 
 function handlePlay(playerId, dominoIndex, x, y, rotation) {
-  if (playerId !== gameState.currentPlayer || !gameState.players[playerId][dominoIndex]) return;
+  if (playerId !== gameState.currentPlayer || !gameState.players[playerId][dominoIndex]) {
+    console.log('Invalid play attempt by player ' + playerId);
+    return;
+  }
   let domino = gameState.players[playerId][dominoIndex];
   let placement = canPlaceDomino(domino, x, y, rotation);
   if (placement) {
@@ -190,6 +198,7 @@ function handlePlay(playerId, dominoIndex, x, y, rotation) {
       domino.isSpinner = true;
       gameState.doubleInPlay = domino;
       gameState.doubleCounter = 0;
+      console.log('Double played: [' + domino.a + '|' + domino.b + '] by ' + gameState.playerNames[playerId]);
     }
     gameState.board.push(domino);
     updateOpenEnds(domino, placement);
@@ -199,20 +208,25 @@ function handlePlay(playerId, dominoIndex, x, y, rotation) {
       if (gameState.doubleCounter >= 3) {
         gameState.doubleInPlay = null;
         gameState.doubleCounter = 0;
+        console.log('Double play requirement satisfied');
       }
     }
     if (gameState.board.length === 1) {
       gameState.gameStarted = true;
       gameState.spinner = domino;
+      console.log('Game started with [' + domino.a + '|' + domino.b + ']');
     }
     gameState.currentPlayer = (gameState.currentPlayer + 1) % gameState.players.length;
+    console.log('Next player: ' + gameState.playerNames[gameState.currentPlayer]);
     checkGameEnd();
     broadcastState();
+  } else {
+    console.log('Invalid placement by player ' + playerId + ': [' + domino.a + '|' + domino.b + ']');
   }
 }
 
 function canPlaceDomino(domino, x, y, rotation) {
-  domino.rotation = rotation; // Temporarily set rotation for getEnds
+  domino.rotation = rotation;
   if (!gameState.gameStarted) {
     if ((domino.a === gameState.currentRound && domino.b === gameState.currentRound) || (domino.a === 'S' && domino.b === 'S')) {
       return { x: 400, y: 300, rotation: 0 };
@@ -295,12 +309,14 @@ function updateOpenEnds(domino, placement) {
 function handleDraw(playerId) {
   if (playerId !== gameState.currentPlayer || gameState.boneyard.length === 0) {
     gameState.currentPlayer = (gameState.currentPlayer + 1) % gameState.players.length;
+    console.log('Player ' + playerId + ' passed (no tiles to draw)');
     broadcastState();
     return;
   }
   let domino = gameState.boneyard.pop();
   positionDomino(domino, playerId, gameState.players[playerId].length);
   gameState.players[playerId].push(domino);
+  console.log('Player ' + gameState.playerNames[playerId] + ' drew [' + domino.a + '|' + domino.b + ']');
   gameState.currentPlayer = (gameState.currentPlayer + 1) % gameState.players.length;
   broadcastState();
 }
@@ -312,6 +328,7 @@ function checkGameEnd() {
       gameState.scores[i] += gameState.players[i].reduce((sum, domino) => sum + domino.getScore(), 0);
     }
     gameState.scores[gameState.currentPlayer] += 0;
+    console.log('Round ended. Winner: ' + gameState.playerNames[gameState.roundWinner] + '. Scores: ' + gameState.scores.join(', '));
     if (gameState.currentRound > 0) {
       gameState.currentRound--;
       initializeRound();
@@ -324,14 +341,17 @@ function checkGameEnd() {
 function endGame() {
   let winnerIndex = gameState.scores.indexOf(Math.min(...gameState.scores));
   let winner = gameState.playerNames[winnerIndex];
+  console.log('Game ended. Winner: ' + winner + ' with score ' + gameState.scores[winnerIndex]);
   clients.forEach(client => {
-    client.send(JSON.stringify({
-      type: 'gameOver',
-      winner: gameState.playerNames[gameState.roundWinner],
-      scores: gameState.scores,
-      gameWinner: winner,
-      winnerIndex
-    }));
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(JSON.stringify({
+        type: 'gameOver',
+        winner: gameState.playerNames[gameState.roundWinner],
+        scores: gameState.scores,
+        gameWinner: winner,
+        winnerIndex
+      }));
+    }
   });
 }
 
@@ -346,12 +366,23 @@ function broadcastState() {
 wss.on('connection', (ws) => {
   console.log('New client connected');
   ws.on('message', (message) => {
-    const msg = JSON.parse(message);
+    let msg;
+    try {
+      msg = JSON.parse(message);
+    } catch (e) {
+      console.error('Invalid message received:', message);
+      return;
+    }
     if (msg.type === 'join') {
       clients.push(ws);
       ws.playerId = clients.length - 1;
-      playerNames.push(msg.names[ws.playerId]);
-      console.log(`Player ${ws.playerId} joined: ${msg.names[ws.playerId]}`);
+      if (msg.names && msg.names[ws.playerId]) {
+        playerNames.push(msg.names[ws.playerId]);
+        console.log('Player ' + ws.playerId + ' joined: ' + msg.names[ws.playerId]);
+      } else {
+        console.error('Invalid names array in join message:', msg.names);
+        return;
+      }
       if (clients.length === msg.numPlayers) {
         initializeGame(msg.numPlayers, msg.names);
       }
@@ -364,7 +395,7 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
-    console.log('Client disconnected');
+    console.log('Client disconnected: Player ' + ws.playerId);
     clients = clients.filter(client => client !== ws);
   });
 
@@ -373,5 +404,5 @@ wss.on('connection', (ws) => {
   });
 });
 
-console.log('WebSocket server running on port', process.env.PORT || 8080);
+console.log('WebSocket server running on port ' + (process.env.PORT || 8080));
 ```
