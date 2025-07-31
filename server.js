@@ -1,408 +1,309 @@
+// server.js
 
-```javascript
-const WebSocket = require('ws');
-const wss = new WebSocket.Server({ port: process.env.PORT || 8080 });
+// --- Setup Express and Socket.IO ---
+const express = require('express');
+const http = require('http');
+const { Server } = require("socket.io");
+const cors = require('cors');
 
-let gameState = null;
-let clients = [];
-let playerNames = [];
+const app = express();
+app.use(cors()); // Allow cross-origin requests
 
-class Domino {
-  constructor(a, b) {
-    this.a = a;
-    this.b = b;
-    this.x = 0;
-    this.y = 0;
-    this.rotation = 0;
-    this.placed = false;
-    this.isSpinner = a === 'S' && b === 'S';
-    this.connectedEnds = { left: null, right: null, top: null, bottom: null };
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: "*", // Allow all origins for simplicity. For production, you'd restrict this.
+    methods: ["GET", "POST"]
   }
-
-  getEnds() {
-    if (this.isSpinner) {
-      return [this.a, this.a, this.a, this.a];
-    }
-    if (this.rotation === 0 || this.rotation === 180) {
-      return { left: this.a, right: this.b };
-    } else {
-      return { left: this.b, right: this.a };
-    }
-  }
-
-  getScore() {
-    let score = 0;
-    if (this.a === 'S' && this.b === 'S') return 20;
-    if (this.a === 'S') score += 10;
-    else score += this.a;
-    if (this.b === 'S') score += 10;
-    else score += this.b;
-    return score;
-  }
-}
-
-function initializeGame(numPlayers, names) {
-  console.log('Initializing game with ' + numPlayers + ' players: ' + names.join(', '));
-  gameState = {
-    dominoes: [],
-    board: [],
-    players: Array(numPlayers).fill().map(() => []),
-    boneyard: [],
-    currentPlayer: 0,
-    selectedDomino: null,
-    gameStarted: false,
-    playerNames: names,
-    currentRound: 9,
-    spinner: null,
-    openEnds: [],
-    scores: Array(numPlayers).fill(0),
-    doubleCounter: 0,
-    doubleInPlay: null,
-    roundWinner: 0
-  };
-
-  for (let i = 0; i <= 9; i++) {
-    for (let j = i; j <= 9; j++) {
-      gameState.dominoes.push(new Domino(i, j));
-    }
-  }
-  gameState.dominoes.push(new Domino('S', 'S'));
-  for (let i = 0; i <= 9; i++) {
-    gameState.dominoes.push(new Domino('S', i));
-  }
-
-  for (let i = gameState.dominoes.length - 1; i > 0; i--) {
-    let j = Math.floor(Math.random() * (i + 1));
-    [gameState.dominoes[i], gameState.dominoes[j]] = [gameState.dominoes[j], gameState.dominoes[i]];
-  }
-  gameState.boneyard = [...gameState.dominoes];
-
-  dealDominoes();
-  findStartingPlayer();
-  broadcastState();
-}
-
-function dealDominoes() {
-  let dominoesPerPlayer = gameState.players.length === 2 ? 14 : 7;
-  for (let i = 0; i < gameState.players.length; i++) {
-    gameState.players[i] = [];
-    for (let j = 0; j < dominoesPerPlayer; j++) {
-      if (gameState.boneyard.length > 0) {
-        let domino = gameState.boneyard.pop();
-        positionDomino(domino, i, j);
-        gameState.players[i].push(domino);
-      }
-    }
-  }
-}
-
-function positionDomino(domino, playerIndex, dominoIndex) {
-  const angleStep = 2 * Math.PI / gameState.players.length;
-  const radius = 250;
-  const centerX = 400;
-  const centerY = 300;
-  const angle = playerIndex * angleStep;
-  domino.x = centerX + radius * Math.cos(angle) + (dominoIndex - gameState.players[playerIndex].length / 2) * 60 * Math.cos(angle + Math.PI / 2);
-  domino.y = centerY + radius * Math.sin(angle) + (dominoIndex - gameState.players[playerIndex].length / 2) * 60 * Math.sin(angle + Math.PI / 2);
-  domino.rotation = (angle + Math.PI / 2) * 180 / Math.PI;
-}
-
-function findStartingPlayer() {
-  let hasSetDomino = false;
-  for (let i = 0; i < gameState.players.length; i++) {
-    for (let domino of gameState.players[i]) {
-      if ((domino.a === gameState.currentRound && domino.b === gameState.currentRound) || (domino.a === 'S' && domino.b === 'S')) {
-        gameState.currentPlayer = i;
-        hasSetDomino = true;
-        console.log('Starting player: ' + gameState.playerNames[i] + ' with [' + domino.a + '|' + domino.b + ']');
-        break;
-      }
-    }
-    if (hasSetDomino) break;
-  }
-  if (!hasSetDomino) {
-    let drawRound = 0;
-    while (!hasSetDomino && gameState.boneyard.length > 0) {
-      let playerIndex = (gameState.roundWinner + drawRound) % gameState.players.length;
-      if (gameState.boneyard.length > 0) {
-        let domino = gameState.boneyard.pop();
-        positionDomino(domino, playerIndex, gameState.players[playerIndex].length);
-        gameState.players[playerIndex].push(domino);
-        if ((domino.a === gameState.currentRound && domino.b === gameState.currentRound) || (domino.a === 'S' && domino.b === 'S')) {
-          gameState.currentPlayer = playerIndex;
-          hasSetDomino = true;
-          console.log('Starting player after draw: ' + gameState.playerNames[playerIndex] + ' with [' + domino.a + '|' + domino.b + ']');
-        }
-        drawRound++;
-      }
-    }
-  }
-  if (!hasSetDomino) {
-    gameState.currentRound--;
-    if (gameState.currentRound >= 0) {
-      console.log('No set domino found, moving to round ' + (10 - gameState.currentRound));
-      initializeRound();
-    } else {
-      console.log('Game over: no set domino found in final round');
-      endGame();
-    }
-  }
-}
-
-function initializeRound() {
-  gameState.dominoes = [];
-  gameState.board = [];
-  gameState.players = Array(gameState.players.length).fill().map(() => []);
-  gameState.boneyard = [];
-  gameState.selectedDomino = null;
-  gameState.gameStarted = false;
-  gameState.spinner = null;
-  gameState.openEnds = [];
-  gameState.doubleCounter = 0;
-  gameState.doubleInPlay = null;
-
-  for (let i = 0; i <= 9; i++) {
-    for (let j = i; j <= 9; j++) {
-      gameState.dominoes.push(new Domino(i, j));
-    }
-  }
-  gameState.dominoes.push(new Domino('S', 'S'));
-  for (let i = 0; i <= 9; i++) {
-    gameState.dominoes.push(new Domino('S', i));
-  }
-
-  for (let i = gameState.dominoes.length - 1; i > 0; i--) {
-    let j = Math.floor(Math.random() * (i + 1));
-    [gameState.dominoes[i], gameState.dominoes[j]] = [gameState.dominoes[j], gameState.dominoes[i]];
-  }
-  gameState.boneyard = [...gameState.dominoes];
-
-  dealDominoes();
-  findStartingPlayer();
-  broadcastState();
-}
-
-function handlePlay(playerId, dominoIndex, x, y, rotation) {
-  if (playerId !== gameState.currentPlayer || !gameState.players[playerId][dominoIndex]) {
-    console.log('Invalid play attempt by player ' + playerId);
-    return;
-  }
-  let domino = gameState.players[playerId][dominoIndex];
-  let placement = canPlaceDomino(domino, x, y, rotation);
-  if (placement) {
-    domino.placed = true;
-    domino.x = placement.x;
-    domino.y = placement.y;
-    domino.rotation = placement.rotation;
-    if (domino.a === domino.b || (domino.a === 'S' && domino.b === 'S')) {
-      domino.isSpinner = true;
-      gameState.doubleInPlay = domino;
-      gameState.doubleCounter = 0;
-      console.log('Double played: [' + domino.a + '|' + domino.b + '] by ' + gameState.playerNames[playerId]);
-    }
-    gameState.board.push(domino);
-    updateOpenEnds(domino, placement);
-    gameState.players[playerId] = gameState.players[playerId].filter((_, i) => i !== dominoIndex);
-    if (gameState.doubleInPlay) {
-      gameState.doubleCounter++;
-      if (gameState.doubleCounter >= 3) {
-        gameState.doubleInPlay = null;
-        gameState.doubleCounter = 0;
-        console.log('Double play requirement satisfied');
-      }
-    }
-    if (gameState.board.length === 1) {
-      gameState.gameStarted = true;
-      gameState.spinner = domino;
-      console.log('Game started with [' + domino.a + '|' + domino.b + ']');
-    }
-    gameState.currentPlayer = (gameState.currentPlayer + 1) % gameState.players.length;
-    console.log('Next player: ' + gameState.playerNames[gameState.currentPlayer]);
-    checkGameEnd();
-    broadcastState();
-  } else {
-    console.log('Invalid placement by player ' + playerId + ': [' + domino.a + '|' + domino.b + ']');
-  }
-}
-
-function canPlaceDomino(domino, x, y, rotation) {
-  domino.rotation = rotation;
-  if (!gameState.gameStarted) {
-    if ((domino.a === gameState.currentRound && domino.b === gameState.currentRound) || (domino.a === 'S' && domino.b === 'S')) {
-      return { x: 400, y: 300, rotation: 0 };
-    }
-    return false;
-  }
-  if (gameState.doubleInPlay && gameState.doubleCounter < 3) {
-    let matchNum = gameState.doubleInPlay.a === 'S' ? gameState.currentRound : gameState.doubleInPlay.a;
-    for (let end of gameState.openEnds) {
-      if (end.domino === gameState.doubleInPlay) {
-        let canMatch = domino.a === matchNum || domino.b === matchNum || domino.a === 'S' || domino.b === 'S';
-        if (canMatch) {
-          let placement = getPlacementPosition(end, domino, x, y, rotation);
-          if (placement) return placement;
-        }
-      }
-    }
-    return false;
-  }
-  for (let end of gameState.openEnds) {
-    let canMatch = (domino.a === end.value || domino.b === end.value || domino.a === 'S' || domino.b === 'S');
-    if (canMatch) {
-      let placement = getPlacementPosition(end, domino, x, y, rotation);
-      if (placement) return placement;
-    }
-  }
-  return false;
-}
-
-function getPlacementPosition(end, domino, x, y, rotation) {
-  let dx = end.x - x;
-  let dy = end.y - y;
-  if (Math.abs(dx) > 50 || Math.abs(dy) > 50) return false;
-  let newX = end.x;
-  let newY = end.y;
-  if (end.side === 'left') newX -= 50;
-  else if (end.side === 'right') newX += 50;
-  else if (end.side === 'top') newY -= 30;
-  else if (end.side === 'bottom') newY += 30;
-  return { x: newX, y: newY, rotation };
-}
-
-function updateOpenEnds(domino, placement) {
-  if (!gameState.gameStarted) {
-    if (domino.isSpinner) {
-      gameState.openEnds.push({ domino, value: domino.a === 'S' ? gameState.currentRound : domino.a, side: 'left', x: domino.x - 25, y: domino.y });
-      gameState.openEnds.push({ domino, value: domino.a === 'S' ? gameState.currentRound : domino.a, side: 'right', x: domino.x + 25, y: domino.y });
-      gameState.openEnds.push({ domino, value: domino.a === 'S' ? gameState.currentRound : domino.a, side: 'top', x: domino.x, y: domino.y - 15 });
-      gameState.openEnds.push({ domino, value: domino.a === 'S' ? gameState.currentRound : domino.a, side: 'bottom', x: domino.x, y: domino.y + 15 });
-    } else {
-      let ends = domino.getEnds();
-      gameState.openEnds.push({ domino, value: ends.left, side: 'left', x: domino.x - 25, y: domino.y });
-      gameState.openEnds.push({ domino, value: ends.right, side: 'right', x: domino.x + 25, y: domino.y });
-    }
-    return;
-  }
-  let matchedEnd = gameState.openEnds.find(end => Math.abs(end.x - placement.x) < 50 && Math.abs(end.y - placement.y) < 50);
-  if (matchedEnd) {
-    gameState.openEnds = gameState.openEnds.filter(end => end !== matchedEnd);
-    let ends = domino.getEnds();
-    if (domino.isSpinner) {
-      gameState.openEnds.push({ domino, value: domino.a === 'S' ? matchedEnd.value : domino.a, side: 'left', x: domino.x - 25, y: domino.y });
-      gameState.openEnds.push({ domino, value: domino.a === 'S' ? matchedEnd.value : domino.a, side: 'right', x: domino.x + 25, y: domino.y });
-      gameState.openEnds.push({ domino, value: domino.a === 'S' ? matchedEnd.value : domino.a, side: 'top', x: domino.x, y: domino.y - 15 });
-      gameState.openEnds.push({ domino, value: domino.a === 'S' ? matchedEnd.value : domino.a, side: 'bottom', x: domino.x, y: domino.y + 15 });
-    } else {
-      let matchedValue = domino.a === matchedEnd.value || domino.a === 'S' ? domino.b : domino.a;
-      let unmatchedValue = domino.a === matchedEnd.value || domino.a === 'S' ? domino.a : domino.b;
-      if (placement.rotation === 0 || placement.rotation === 180) {
-        gameState.openEnds.push({ domino, value: matchedValue, side: 'left', x: domino.x - 25, y: domino.y });
-        gameState.openEnds.push({ domino, value: unmatchedValue, side: 'right', x: domino.x + 25, y: domino.y });
-      } else {
-        gameState.openEnds.push({ domino, value: matchedValue, side: 'top', x: domino.x, y: domino.y - 15 });
-        gameState.openEnds.push({ domino, value: unmatchedValue, side: 'bottom', x: domino.x, y: domino.y + 15 });
-      }
-    }
-  }
-}
-
-function handleDraw(playerId) {
-  if (playerId !== gameState.currentPlayer || gameState.boneyard.length === 0) {
-    gameState.currentPlayer = (gameState.currentPlayer + 1) % gameState.players.length;
-    console.log('Player ' + playerId + ' passed (no tiles to draw)');
-    broadcastState();
-    return;
-  }
-  let domino = gameState.boneyard.pop();
-  positionDomino(domino, playerId, gameState.players[playerId].length);
-  gameState.players[playerId].push(domino);
-  console.log('Player ' + gameState.playerNames[playerId] + ' drew [' + domino.a + '|' + domino.b + ']');
-  gameState.currentPlayer = (gameState.currentPlayer + 1) % gameState.players.length;
-  broadcastState();
-}
-
-function checkGameEnd() {
-  if (gameState.players[gameState.currentPlayer].length === 0) {
-    gameState.roundWinner = gameState.currentPlayer;
-    for (let i = 0; i < gameState.players.length; i++) {
-      gameState.scores[i] += gameState.players[i].reduce((sum, domino) => sum + domino.getScore(), 0);
-    }
-    gameState.scores[gameState.currentPlayer] += 0;
-    console.log('Round ended. Winner: ' + gameState.playerNames[gameState.roundWinner] + '. Scores: ' + gameState.scores.join(', '));
-    if (gameState.currentRound > 0) {
-      gameState.currentRound--;
-      initializeRound();
-    } else {
-      endGame();
-    }
-  }
-}
-
-function endGame() {
-  let winnerIndex = gameState.scores.indexOf(Math.min(...gameState.scores));
-  let winner = gameState.playerNames[winnerIndex];
-  console.log('Game ended. Winner: ' + winner + ' with score ' + gameState.scores[winnerIndex]);
-  clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(JSON.stringify({
-        type: 'gameOver',
-        winner: gameState.playerNames[gameState.roundWinner],
-        scores: gameState.scores,
-        gameWinner: winner,
-        winnerIndex
-      }));
-    }
-  });
-}
-
-function broadcastState() {
-  clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(JSON.stringify({ type: 'state', state: gameState }));
-    }
-  });
-}
-
-wss.on('connection', (ws) => {
-  console.log('New client connected');
-  ws.on('message', (message) => {
-    let msg;
-    try {
-      msg = JSON.parse(message);
-    } catch (e) {
-      console.error('Invalid message received:', message);
-      return;
-    }
-    if (msg.type === 'join') {
-      clients.push(ws);
-      ws.playerId = clients.length - 1;
-      if (msg.names && msg.names[ws.playerId]) {
-        playerNames.push(msg.names[ws.playerId]);
-        console.log('Player ' + ws.playerId + ' joined: ' + msg.names[ws.playerId]);
-      } else {
-        console.error('Invalid names array in join message:', msg.names);
-        return;
-      }
-      if (clients.length === msg.numPlayers) {
-        initializeGame(msg.numPlayers, msg.names);
-      }
-      ws.send(JSON.stringify({ type: 'playerId', playerId: ws.playerId }));
-    } else if (msg.type === 'play') {
-      handlePlay(msg.playerId, msg.dominoIndex, msg.x, msg.y, msg.rotation);
-    } else if (msg.type === 'draw') {
-      handleDraw(msg.playerId);
-    }
-  });
-
-  ws.on('close', () => {
-    console.log('Client disconnected: Player ' + ws.playerId);
-    clients = clients.filter(client => client !== ws);
-  });
-
-  ws.on('error', (error) => {
-    console.error('WebSocket error:', error);
-  });
 });
 
-console.log('WebSocket server running on port ' + (process.env.PORT || 8080));
-```
+// In-memory storage for all active games
+const games = {};
+
+// --- Game Constants ---
+const SPINNER_VALUE = -1;
+const TARGET_SCORE = 100;
+
+// --- Game Logic Utilities ---
+
+/**
+ * Generates a complete deck of Double-Nine dominoes, including spinners.
+ * @returns {Array<Object>} The generated deck.
+ */
+function generateDeck() {
+    const deck = [];
+    // Standard double-nine set
+    for (let i = 0; i <= 9; i++) {
+        for (let j = i; j <= 9; j++) {
+            deck.push({ top: i, bottom: j, id: `d-${i}-${j}` });
+        }
+    }
+    // Spinners (0 to 9)
+    for (let i = 0; i <= 9; i++) {
+        deck.push({ top: SPINNER_VALUE, bottom: i, id: `s-${i}` });
+    }
+    // Double-Spinner
+    deck.push({ top: SPINNER_VALUE, bottom: SPINNER_VALUE, id: 'd-s-s' });
+    return deck;
+}
+
+/**
+ * Shuffles an array in place using the Fisher-Yates algorithm.
+ * @param {Array<any>} array The array to shuffle.
+ */
+function shuffle(array) {
+    for (let i = array.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [array[i], array[j]] = [array[j], array[i]];
+    }
+}
+
+/**
+ * Calculates the point value of a player's hand.
+ * @param {Array<Object>} hand The player's hand.
+ * @returns {number} The total score of the hand.
+ */
+function calculateHandValue(hand) {
+    return hand.reduce((total, domino) => {
+        const topValue = domino.top === SPINNER_VALUE ? 10 : domino.top;
+        const bottomValue = domino.bottom === SPINNER_VALUE ? 10 : domino.bottom;
+        return total + topValue + bottomValue;
+    }, 0);
+}
+
+/**
+ * Creates a new game state object.
+ * @param {string} gameId The unique ID for the game.
+ * @param {number} playerCount The number of players.
+ * @param {Object} playerNames A map of player numbers to names.
+ * @returns {Object} The initial game state.
+ */
+function createNewGameState(gameId, playerCount, playerNames) {
+    return {
+        gameId,
+        players: playerCount,
+        playerNames: playerNames,
+        sockets: {},
+        currentPlayer: 1,
+        scores: Object.fromEntries(Array.from({ length: playerCount }, (_, i) => [i + 1, 0])),
+        hands: {},
+        boneyard: [],
+        boardDominos: [],
+        moveHistory: [],
+        turnState: 'WAITING', // WAITING, PLACED
+        mustDrawToStart: false,
+        currentTheme: 'classic',
+        targetScore: TARGET_SCORE,
+        roundNumber: 0,
+        lastDrawnDominoId: null,
+    };
+}
+
+/**
+ * Starts a new round, deals cards, and determines the starting player.
+ * @param {Object} gameState The current state of the game.
+ */
+function startNewRound(gameState) {
+    gameState.roundNumber++;
+    gameState.boardDominos = [];
+    gameState.moveHistory = [];
+    gameState.turnState = 'WAITING';
+    
+    const deck = generateDeck();
+    shuffle(deck);
+
+    // Deal hands
+    const handSize = gameState.players <= 4 ? 9 : 7;
+    for (let i = 1; i <= gameState.players; i++) {
+        gameState.hands[i] = deck.splice(0, handSize);
+    }
+    gameState.boneyard = deck;
+
+    // Determine who starts this round
+    let starter = { player: null, domino: null, highestDouble: -2 };
+    for (let p = 1; p <= gameState.players; p++) {
+        for (const domino of gameState.hands[p]) {
+            if (domino.top === domino.bottom && domino.top > starter.highestDouble) {
+                starter = { player: p, domino, highestDouble: domino.top };
+            }
+        }
+    }
+    
+    if (starter.player) {
+        gameState.currentPlayer = starter.player;
+        gameState.mustDrawToStart = false;
+    } else {
+        // No one has a double, the first player will have to draw.
+        gameState.currentPlayer = (gameState.roundNumber - 1) % gameState.players + 1;
+        gameState.mustDrawToStart = true;
+    }
+}
+
+
+// --- Socket Connection Handler ---
+io.on('connection', (socket) => {
+    console.log(`A user connected: ${socket.id}`);
+
+    // Create a new game
+    socket.on('createGame', ({ playerCount, playerNames }) => {
+        const gameId = Math.random().toString(36).substr(2, 5).toUpperCase();
+        const gameState = createNewGameState(gameId, playerCount, playerNames);
+        gameState.sockets[1] = socket.id;
+        games[gameId] = gameState;
+        
+        startNewRound(gameState);
+
+        socket.join(gameId);
+        socket.emit('gameCreated', { gameId, playerNum: 1, gameState });
+        console.log(`Game ${gameId} created by ${playerNames[1]}.`);
+    });
+
+    // Join an existing game
+    socket.on('joinGame', ({ gameId, playerName }) => {
+        const game = games[gameId];
+        if (!game) {
+            return socket.emit('error', { message: 'Game not found.' });
+        }
+        
+        const playerNum = Object.keys(game.sockets).length + 1;
+        if (playerNum > game.players) {
+            return socket.emit('error', { message: 'Game is full.' });
+        }
+
+        game.sockets[playerNum] = socket.id;
+        game.playerNames[playerNum] = playerName;
+        
+        socket.join(gameId);
+        socket.emit('joinedGame', { gameId, playerNum, gameState: game });
+        
+        // Notify all players of the new join and updated names
+        io.to(gameId).emit('gameUpdate', game);
+        console.log(`${playerName} joined game ${gameId} as Player ${playerNum}.`);
+    });
+
+    // Handle all in-game actions
+    socket.on('gameAction', ({ gameId, action, data }) => {
+        const game = games[gameId];
+        if (!game) return;
+
+        const playerNum = Object.keys(game.sockets).find(key => game.sockets[key] === socket.id);
+        if (!playerNum || parseInt(playerNum) !== game.currentPlayer) {
+            // It's not this player's turn, ignore the action.
+            // You might want to send an error message for debugging.
+            // return socket.emit('error', { message: "It's not your turn!" });
+        }
+
+        switch (action) {
+            case 'placeDomino':
+                // Server-side validation would go here
+                const hand = game.hands[game.currentPlayer];
+                const dominoIndex = hand.findIndex(d => d.id === data.dominoId);
+                if (dominoIndex > -1) {
+                    const [dominoData] = hand.splice(dominoIndex, 1);
+                    game.boardDominos.push({ x: data.x, y: data.y, rotation: data.rotation, dominoData });
+                    game.turnState = 'PLACED';
+                    game.moveHistory.push({ action: 'place', player: game.currentPlayer, dominoData });
+
+                    if (hand.length === 0) {
+                        // Player is out of dominoes, end the round
+                        endRound(game, game.currentPlayer);
+                    }
+                }
+                break;
+
+            case 'draw':
+                if (game.boneyard.length > 0) {
+                    const drawnDomino = game.boneyard.pop();
+                    game.hands[game.currentPlayer].push(drawnDomino);
+                    game.lastDrawnDominoId = drawnDomino.id;
+                    game.moveHistory.push({ action: 'draw', player: game.currentPlayer, dominoData: drawnDomino });
+                }
+                break;
+
+            case 'endTurn':
+                game.currentPlayer = (game.currentPlayer % game.players) + 1;
+                game.turnState = 'WAITING';
+                break;
+                
+            case 'passTurn':
+                // Add server-side validation to ensure player cannot play
+                game.currentPlayer = (game.currentPlayer % game.players) + 1;
+                game.turnState = 'WAITING';
+                break;
+
+            case 'undo':
+                const lastMove = game.moveHistory.pop();
+                if (lastMove) {
+                    if (lastMove.action === 'place') {
+                        game.boardDominos = game.boardDominos.filter(d => d.dominoData.id !== lastMove.dominoData.id);
+                        game.hands[lastMove.player].push(lastMove.dominoData);
+                        game.turnState = 'WAITING';
+                    } else if (lastMove.action === 'draw') {
+                        game.hands[lastMove.player] = game.hands[lastMove.player].filter(d => d.id !== lastMove.dominoData.id);
+                        game.boneyard.push(lastMove.dominoData);
+                    }
+                }
+                break;
+                
+            case 'startNextRound':
+                startNewRound(game);
+                break;
+
+            case 'resetGame':
+                // Reset logic can be handled here, or just let clients disconnect and start a new game.
+                // For a simple reset, re-initialize the game state.
+                const newGameState = createNewGameState(gameId, game.players, game.playerNames);
+                newGameState.sockets = game.sockets; // Keep the players connected
+                games[gameId] = newGameState;
+                startNewRound(games[gameId]);
+                io.to(gameId).emit('gameUpdate', games[gameId]); // Send the fresh state to everyone
+                return; // Prevent the default broadcast
+        }
+        
+        // Broadcast the updated game state to all players in the room
+        io.to(gameId).emit('gameUpdate', game);
+    });
+
+    function endRound(game, winnerNum) {
+        let totalScore = 0;
+        for (let i = 1; i <= game.players; i++) {
+            if (i !== winnerNum) {
+                totalScore += calculateHandValue(game.hands[i]);
+            }
+        }
+        game.scores[winnerNum] += totalScore;
+
+        io.to(game.gameId).emit('roundEnd', { winner: winnerNum, scores: game.scores });
+
+        // Check for game over
+        if (game.scores[winnerNum] >= TARGET_SCORE) {
+            setTimeout(() => {
+                io.to(game.gameId).emit('gameOver', { scores: game.scores });
+                delete games[game.gameId];
+            }, 5000); // Wait 5 seconds before ending game
+        }
+    }
+
+    socket.on('disconnect', () => {
+        console.log(`A user disconnected: ${socket.id}`);
+        // Find which game the user was in and handle their departure
+        for (const gameId in games) {
+            const game = games[gameId];
+            const playerNum = Object.keys(game.sockets).find(key => game.sockets[key] === socket.id);
+            if (playerNum) {
+                console.log(`Player ${playerNum} (${game.playerNames[playerNum]}) left game ${gameId}.`);
+                delete game.sockets[playerNum];
+                // Optional: end the game if a player leaves
+                // io.to(gameId).emit('error', { message: `Player ${game.playerNames[playerNum]} has disconnected. Game over.` });
+                // delete games[gameId];
+                break;
+            }
+        }
+    });
+});
+
+// --- Start the Server ---
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+});
