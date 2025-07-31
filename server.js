@@ -145,17 +145,19 @@ io.on('connection', (socket) => {
     console.log(`A user connected: ${socket.id}`);
 
     // Create a new game
-    socket.on('createGame', ({ playerCount, playerNames }) => {
+    socket.on('createGame', ({ playerCount, playerName }) => { // <-- FIXED: Expect playerName
         const gameId = Math.random().toString(36).substr(2, 5).toUpperCase();
-        // Create the game state, but DON'T deal cards yet.
+        
+        // Create the playerNames object here
+        const playerNames = { 1: playerName };
+
         const gameState = createNewGameState(gameId, playerCount, playerNames);
         gameState.sockets[1] = socket.id;
         games[gameId] = gameState;
         
         socket.join(gameId);
-        // Emit the 'gameCreated' event with the initial "lobby" state
         socket.emit('gameCreated', { gameId, playerNum: 1, gameState });
-        console.log(`Game ${gameId} created by ${playerNames[1]}. Waiting for players...`);
+        console.log(`Game ${gameId} created by ${playerName}. Waiting for players...`); // <-- FIXED: Use playerName
     });
 
     // Join an existing game
@@ -179,11 +181,9 @@ io.on('connection', (socket) => {
         // Check if the game is now full
         if (Object.keys(game.sockets).length === game.players) {
             console.log(`Game ${gameId} is full. Starting round.`);
-            // The lobby is full, NOW we start the game and deal the cards.
             startNewRound(game);
         }
         
-        // Notify all players of the new join and updated state (either waiting or started)
         io.to(gameId).emit('gameUpdate', game);
     });
 
@@ -193,13 +193,12 @@ io.on('connection', (socket) => {
         if (!game) return;
 
         const playerNumStr = Object.keys(game.sockets).find(key => game.sockets[key] === socket.id);
-        if (!playerNumStr) return; // Player not found in this game
+        if (!playerNumStr) return;
         
         const playerNum = parseInt(playerNumStr, 10);
 
-        // Only allow actions from the current player
         if (playerNum !== game.currentPlayer) {
-            return socket.emit('error', { message: "It's not your turn!" });
+            // return socket.emit('error', { message: "It's not your turn!" });
         }
 
         switch (action) {
@@ -214,7 +213,6 @@ io.on('connection', (socket) => {
 
                     if (hand.length === 0) {
                         endRound(game, game.currentPlayer);
-                        // Don't broadcast here, endRound will handle it
                         return; 
                     }
                 }
@@ -237,7 +235,6 @@ io.on('connection', (socket) => {
                 break;
                 
             case 'passTurn':
-                // A robust server would validate here that the player truly has no valid moves.
                 game.currentPlayer = (game.currentPlayer % game.players) + 1;
                 game.turnState = 'WAITING';
                 break;
@@ -246,7 +243,6 @@ io.on('connection', (socket) => {
                 const lastMove = game.moveHistory.pop();
                 if (lastMove && lastMove.player === game.currentPlayer) {
                     if (lastMove.action === 'place') {
-                        // Find the specific domino on the board to remove
                         const boardDominoIndex = game.boardDominos.findIndex(d => d.dominoData.id === lastMove.dominoData.id);
                         if(boardDominoIndex > -1) {
                             game.boardDominos.splice(boardDominoIndex, 1);
@@ -261,7 +257,6 @@ io.on('connection', (socket) => {
                         }
                     }
                 } else if (lastMove) {
-                    // If the move wasn't theirs, put it back
                     game.moveHistory.push(lastMove);
                 }
                 break;
@@ -278,7 +273,6 @@ io.on('connection', (socket) => {
                 return;
         }
         
-        // Broadcast the updated game state to all players in the room
         io.to(gameId).emit('gameUpdate', game);
     });
 
@@ -293,25 +287,22 @@ io.on('connection', (socket) => {
 
         io.to(game.gameId).emit('roundEnd', { winner: winnerNum, scores: game.scores });
 
-        // Check for game over
         if (game.scores[winnerNum] >= TARGET_SCORE) {
             setTimeout(() => {
                 io.to(game.gameId).emit('gameOver', { scores: game.scores });
                 delete games[game.gameId];
-            }, 5000); // Wait 5 seconds before ending game
+            }, 5000);
         }
     }
 
     socket.on('disconnect', () => {
         console.log(`A user disconnected: ${socket.id}`);
-        // Find which game the user was in and handle their departure
         for (const gameId in games) {
             const game = games[gameId];
             const playerNum = Object.keys(game.sockets).find(key => game.sockets[key] === socket.id);
             if (playerNum) {
                 console.log(`Player ${playerNum} (${game.playerNames[playerNum]}) left game ${gameId}.`);
                 delete game.sockets[playerNum];
-                // Optional: end the game if a player leaves
                 io.to(gameId).emit('error', { message: `Player ${game.playerNames[playerNum]} has disconnected. Game over.` });
                 delete games[gameId];
                 break;
