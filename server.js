@@ -147,15 +147,15 @@ io.on('connection', (socket) => {
     // Create a new game
     socket.on('createGame', ({ playerCount, playerNames }) => {
         const gameId = Math.random().toString(36).substr(2, 5).toUpperCase();
+        // Create the game state, but DON'T deal cards yet.
         const gameState = createNewGameState(gameId, playerCount, playerNames);
         gameState.sockets[1] = socket.id;
         games[gameId] = gameState;
         
-        startNewRound(gameState);
-
         socket.join(gameId);
+        // Emit the 'gameCreated' event with the initial "lobby" state
         socket.emit('gameCreated', { gameId, playerNum: 1, gameState });
-        console.log(`Game ${gameId} created by ${playerNames[1]}.`);
+        console.log(`Game ${gameId} created by ${playerNames[1]}. Waiting for players...`);
     });
 
     // Join an existing game
@@ -174,11 +174,17 @@ io.on('connection', (socket) => {
         game.playerNames[playerNum] = playerName;
         
         socket.join(gameId);
-        socket.emit('joinedGame', { gameId, playerNum, gameState: game });
-        
-        // Notify all players of the new join and updated names
-        io.to(gameId).emit('gameUpdate', game);
         console.log(`${playerName} joined game ${gameId} as Player ${playerNum}.`);
+
+        // Check if the game is now full
+        if (Object.keys(game.sockets).length === game.players) {
+            console.log(`Game ${gameId} is full. Starting round.`);
+            // The lobby is full, NOW we start the game and deal the cards.
+            startNewRound(game);
+        }
+        
+        // Notify all players of the new join and updated state (either waiting or started)
+        io.to(gameId).emit('gameUpdate', game);
     });
 
     // Handle all in-game actions
@@ -186,16 +192,18 @@ io.on('connection', (socket) => {
         const game = games[gameId];
         if (!game) return;
 
-        const playerNum = Object.keys(game.sockets).find(key => game.sockets[key] === socket.id);
-        if (!playerNum || parseInt(playerNum) !== game.currentPlayer) {
-            // It's not this player's turn, ignore the action.
-            // You might want to send an error message for debugging.
-            // return socket.emit('error', { message: "It's not your turn!" });
+        const playerNumStr = Object.keys(game.sockets).find(key => game.sockets[key] === socket.id);
+        if (!playerNumStr) return; // Player not found in this game
+        
+        const playerNum = parseInt(playerNumStr, 10);
+
+        // Only allow actions from the current player
+        if (playerNum !== game.currentPlayer) {
+            return socket.emit('error', { message: "It's not your turn!" });
         }
 
         switch (action) {
             case 'placeDomino':
-                // Server-side validation would go here
                 const hand = game.hands[game.currentPlayer];
                 const dominoIndex = hand.findIndex(d => d.id === data.dominoId);
                 if (dominoIndex > -1) {
@@ -205,8 +213,9 @@ io.on('connection', (socket) => {
                     game.moveHistory.push({ action: 'place', player: game.currentPlayer, dominoData });
 
                     if (hand.length === 0) {
-                        // Player is out of dominoes, end the round
                         endRound(game, game.currentPlayer);
+                        // Don't broadcast here, endRound will handle it
+                        return; 
                     }
                 }
                 break;
@@ -221,27 +230,39 @@ io.on('connection', (socket) => {
                 break;
 
             case 'endTurn':
-                game.currentPlayer = (game.currentPlayer % game.players) + 1;
-                game.turnState = 'WAITING';
+                if (game.turnState === 'PLACED') {
+                    game.currentPlayer = (game.currentPlayer % game.players) + 1;
+                    game.turnState = 'WAITING';
+                }
                 break;
                 
             case 'passTurn':
-                // Add server-side validation to ensure player cannot play
+                // A robust server would validate here that the player truly has no valid moves.
                 game.currentPlayer = (game.currentPlayer % game.players) + 1;
                 game.turnState = 'WAITING';
                 break;
 
             case 'undo':
                 const lastMove = game.moveHistory.pop();
-                if (lastMove) {
+                if (lastMove && lastMove.player === game.currentPlayer) {
                     if (lastMove.action === 'place') {
-                        game.boardDominos = game.boardDominos.filter(d => d.dominoData.id !== lastMove.dominoData.id);
-                        game.hands[lastMove.player].push(lastMove.dominoData);
-                        game.turnState = 'WAITING';
+                        // Find the specific domino on the board to remove
+                        const boardDominoIndex = game.boardDominos.findIndex(d => d.dominoData.id === lastMove.dominoData.id);
+                        if(boardDominoIndex > -1) {
+                            game.boardDominos.splice(boardDominoIndex, 1);
+                            game.hands[lastMove.player].push(lastMove.dominoData);
+                            game.turnState = 'WAITING';
+                        }
                     } else if (lastMove.action === 'draw') {
-                        game.hands[lastMove.player] = game.hands[lastMove.player].filter(d => d.id !== lastMove.dominoData.id);
-                        game.boneyard.push(lastMove.dominoData);
+                        const handDominoIndex = game.hands[lastMove.player].findIndex(d => d.id === lastMove.dominoData.id);
+                         if(handDominoIndex > -1) {
+                            const [undrawnDomino] = game.hands[lastMove.player].splice(handDominoIndex, 1);
+                            game.boneyard.push(undrawnDomino);
+                        }
                     }
+                } else if (lastMove) {
+                    // If the move wasn't theirs, put it back
+                    game.moveHistory.push(lastMove);
                 }
                 break;
                 
@@ -250,14 +271,11 @@ io.on('connection', (socket) => {
                 break;
 
             case 'resetGame':
-                // Reset logic can be handled here, or just let clients disconnect and start a new game.
-                // For a simple reset, re-initialize the game state.
                 const newGameState = createNewGameState(gameId, game.players, game.playerNames);
-                newGameState.sockets = game.sockets; // Keep the players connected
+                newGameState.sockets = game.sockets;
                 games[gameId] = newGameState;
-                startNewRound(games[gameId]);
-                io.to(gameId).emit('gameUpdate', games[gameId]); // Send the fresh state to everyone
-                return; // Prevent the default broadcast
+                io.to(gameId).emit('gameUpdate', games[gameId]);
+                return;
         }
         
         // Broadcast the updated game state to all players in the room
@@ -294,8 +312,8 @@ io.on('connection', (socket) => {
                 console.log(`Player ${playerNum} (${game.playerNames[playerNum]}) left game ${gameId}.`);
                 delete game.sockets[playerNum];
                 // Optional: end the game if a player leaves
-                // io.to(gameId).emit('error', { message: `Player ${game.playerNames[playerNum]} has disconnected. Game over.` });
-                // delete games[gameId];
+                io.to(gameId).emit('error', { message: `Player ${game.playerNames[playerNum]} has disconnected. Game over.` });
+                delete games[gameId];
                 break;
             }
         }
